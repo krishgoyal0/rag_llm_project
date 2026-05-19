@@ -1,4 +1,4 @@
-// File: C:\Users\Lenovo\Documents\GitHub\Architect-RAG-LLM-Assistant\rag-frontend-main\app\page.tsx
+// File: C:\Users\Lenovo\Documents\GitHub\RAG-LLM-unfuck-d-\rag-frontend-main\app\page.tsx
 import * as entry from '../../../app/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

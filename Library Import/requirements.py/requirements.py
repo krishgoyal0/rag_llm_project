@@ -10,7 +10,9 @@ requirements = [
     "Pillow==10.4.0",
     "sentence_transformers==5.1.0",
     "fastapi==0.104.1",
-    "uvicorn[standard]==0.24.0"
+    "uvicorn[standard]==0.24.0",
+    "PyPDF2>=4.0.0",
+    "python-docx>=0.8.11"
 ]
 
 def install(package):

@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sys
 import os
+import shutil
+import tempfile
 
 # Add the src directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -31,6 +33,12 @@ class QueryResponse(BaseModel):
     answer: str
     sources: list
 
+class ReportAnalysisResponse(BaseModel):
+    good_points: list
+    bad_points: list
+    summary: str
+    full_analysis: str = None
+
 @app.post("/query", response_model=QueryResponse)
 async def query_research_papers(request: QueryRequest):
     """Process a research query and return answer with sources."""
@@ -47,6 +55,38 @@ async def query_research_papers(request: QueryRequest):
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "message": "Architecture RAG API is running"}
+
+@app.post("/analyze-report", response_model=ReportAnalysisResponse)
+async def analyze_construction_report(file: UploadFile = File(...)):
+    """Analyze a construction report for good and bad points using RAG + Ollama."""
+    try:
+        # Save the uploaded file temporarily
+        temp_dir = tempfile.mkdtemp()
+        file_path = os.path.join(temp_dir, file.filename)
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Extract text from the file
+        text_content = await rag.extract_text_from_file(file_path)
+        
+        if not text_content:
+            raise ValueError("Could not extract text from the uploaded file")
+        
+        # Analyze the report
+        analysis = await rag.analyze_report(text_content)
+        
+        # Clean up
+        shutil.rmtree(temp_dir)
+        
+        return ReportAnalysisResponse(
+            good_points=analysis["good_points"],
+            bad_points=analysis["bad_points"],
+            summary=analysis["summary"],
+            full_analysis=analysis.get("full_analysis")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Report analysis failed: {str(e)}")
 
 @app.get("/stats")
 async def get_stats():

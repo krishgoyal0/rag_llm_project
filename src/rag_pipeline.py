@@ -1,8 +1,21 @@
-﻿import time
-from typing import List, Dict, Any, Generator, Optional
+import time
+import os
+from typing import List, Dict, Any, Generator, Optional, Tuple
 import ollama
 from config import config
 from database import ResearchPaperDatabase
+
+# Optional imports for file processing
+try:
+    import PyPDF2  # type: ignore
+except ImportError:
+    PyPDF2 = None
+
+try:
+    from docx import Document  # type: ignore
+except ImportError:
+    Document = None
+
 
 class RAGPipeline:
     def __init__(self):
@@ -25,7 +38,7 @@ class RAGPipeline:
         text = query.lower()
         return any(keyword in text for keyword in config.BLOCKED_QUERY_KEYWORDS)
 
-    def _validate_query(self, query: str) -> (bool, str):
+    def _validate_query(self, query: str) -> Tuple[bool, str]:
         if not query or not query.strip():
             return False, "Your query is empty."
 
@@ -200,3 +213,157 @@ class RAGPipeline:
         self.db.add_documents_from_jsonl(jsonl_files)
         self.db.persist()
         print("Database initialization complete!")
+
+    async def extract_text_from_file(self, file_path: str) -> str:
+        """Extract text from various file formats."""
+        try:
+            file_extension = os.path.splitext(file_path)[1].lower()
+            
+            if file_extension == '.txt':
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            
+            elif file_extension == '.pdf':
+                try:
+                    if PyPDF2 is None:
+                        print("[RAG] PyPDF2 not installed. Install with: pip install PyPDF2")
+                        return ""
+                    text = []
+                    with open(file_path, 'rb') as f:
+                        pdf_reader = PyPDF2.PdfReader(f)
+                        for page in pdf_reader.pages:
+                            text.append(page.extract_text())
+                    return '\n'.join(text)
+                except Exception as e:
+                    print(f"[RAG] Error processing PDF: {e}")
+                    return ""
+            
+            elif file_extension in ['.docx', '.doc']:
+                try:
+                    if Document is None:
+                        print("[RAG] python-docx not installed. Install with: pip install python-docx")
+                        return ""
+                    doc = Document(file_path)
+                    text = []
+                    for paragraph in doc.paragraphs:
+                        if paragraph.text.strip():
+                            text.append(paragraph.text)
+                    return '\n'.join(text)
+                except Exception as e:
+                    print(f"[RAG] Error processing DOCX: {e}")
+                    return ""
+            
+            else:
+                raise ValueError(f"Unsupported file format: {file_extension}")
+                
+        except Exception as e:
+            print(f"[RAG] Error extracting text from file: {str(e)}")
+            raise
+
+    async def analyze_report(self, report_text: str) -> Dict[str, Any]:
+        """Analyze construction report using LLM's built-in knowledge of building codes"""
+        try:
+            print("[RAG] Starting compliance analysis using LLM knowledge...")
+            
+            # Direct prompt - let Ollama use its training data
+            compliance_prompt = f"""You are a building code compliance officer for INDIA with EXPERT knowledge of:
+- NBC 2016 (National Building Code of India)
+- IS 456:2000 (Concrete code)
+- IS 875 (Structural loads)
+- CPHEEO Manual (Water supply)
+- Delhi/Gurugram building bylaws
+- Fire safety norms
+
+Analyze this construction report and identify SPECIFIC violations with ACTUAL clause numbers.
+
+CONSTRUCTION REPORT:
+{report_text[:10000]}
+
+For EACH violation, output:
+1. EXACT clause number (e.g., "NBC 2016 Part 4, Clause 5.3.2")
+2. What the code ACTUALLY says
+3. What the report has (with specific values)
+4. Severity (Critical/Moderate/Minor)
+5. Specific fix recommendation
+
+Output in JSON format:
+{{
+  "violations": [
+    {{
+      "clause": "Actual clause number from code",
+      "code_requirement": "Exact requirement from the code",
+      "report_value": "What the report actually has",
+      "severity": "Critical/Moderate/Minor",
+      "recommendation": "How to fix it"
+    }}
+  ],
+  "compliance_score": "Number out of 100"
+}}
+
+If a section is compliant, don't include it. Only list VIOLATIONS."""
+
+            print("[RAG] Analyzing with LLM knowledge...")
+            response = self.ollama_client.generate(
+                model=config.OLLAMA_MODEL,
+                prompt=compliance_prompt,
+                stream=False
+            )
+            
+            # Parse the response
+            import json
+            violations = []
+            compliance_score = 50
+            
+            try:
+                resp_text = response['response']
+                json_start = resp_text.find('{')
+                json_end = resp_text.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    parsed = json.loads(resp_text[json_start:json_end])
+                    violations = parsed.get('violations', [])
+                    compliance_score = parsed.get('compliance_score', 50)
+            except Exception as e:
+                print(f"[RAG] Error parsing response: {e}")
+            
+            # Format output
+            good_points = []
+            bad_points = []
+            
+            for v in violations:
+                bad_points.append(f"[{v.get('severity', 'Issue')}] {v.get('clause', 'Unknown')}: {v.get('code_requirement', '')[:150]} (Found: {v.get('report_value', 'N/A')})")
+            
+            if not bad_points:
+                good_points = ["Report appears compliant with major building codes"]
+                summary = f"Compliance Score: {compliance_score}/100 - No major violations"
+            else:
+                summary = f"Found {len(violations)} violation(s). Score: {compliance_score}/100"
+                bad_points.insert(0, f"Overall compliance score: {compliance_score}/100")
+            
+            # Add score-based message
+            try:
+                score_int = int(compliance_score) if compliance_score else 0
+            except (ValueError, TypeError):
+                score_int = 0
+            
+            if score_int >= 80:
+                good_points.insert(0, f"Overall compliance score: {compliance_score}/100 - Good")
+            elif score_int >= 60:
+                good_points.insert(0, f"Overall compliance score: {compliance_score}/100 - Acceptable with improvements")
+            else:
+                if bad_points:
+                    bad_points[0] = f"Overall compliance score: {compliance_score}/100 - Major improvements needed"
+                else:
+                    bad_points.append(f"Overall compliance score: {compliance_score}/100 - Major improvements needed")
+            
+            return {
+                "good_points": good_points if good_points else ["Report structure is readable and extractable"],
+                "bad_points": bad_points if bad_points else ["No compliance issues detected"],
+                "summary": summary,
+                "full_analysis": response['response'],
+                "compliance_score": compliance_score,
+                "violations_count": len(violations)
+            }
+            
+        except Exception as e:
+            print(f"[RAG] Error in compliance analysis: {str(e)}")
+            raise
